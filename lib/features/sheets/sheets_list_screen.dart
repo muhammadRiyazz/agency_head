@@ -428,19 +428,204 @@ class _SheetsListScreenState extends State<SheetsListScreen> {
         },
       );
     } else {
-      return SizedBox(
-        height: 125,
-        child: ListView.separated(
-          scrollDirection: Axis.horizontal,
-          itemCount: cards.length,
-          separatorBuilder: (_, __) => const SizedBox(width: 10),
-          itemBuilder: (_, index) => SizedBox(
-            width: 180,
-            child: cards[index],
-          ),
-        ),
+      // Mobile Adaptive Dashboard: Clean 2x2 KPI card grid + team staff banner
+      // Eliminates awkward horizontal scrolling and prevents RenderFlex bottom overflow!
+      return _buildMobileDashboardOverview(
+        totalSheets: totalSheets,
+        totalLeads: totalLeads,
+        newCount: newCount,
+        paidCount: paidCount,
+        staffCount: staffCount,
       );
     }
+  }
+
+  Widget _buildMobileDashboardOverview({
+    required String totalSheets,
+    required String totalLeads,
+    required String newCount,
+    required String paidCount,
+    required String staffCount,
+  }) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.02),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Row 1: Sheets & Leads
+          Row(
+            children: [
+              Expanded(
+                child: _buildCompactKpiTile(
+                  title: 'Total Sheets',
+                  value: totalSheets,
+                  icon: Icons.table_chart_rounded,
+                  color: const Color(0xFF3B82F6),
+                  badge: 'Sheets',
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _buildCompactKpiTile(
+                  title: 'Total Leads',
+                  value: totalLeads,
+                  icon: Icons.people_alt_rounded,
+                  color: const Color(0xFF8B5CF6),
+                  badge: 'Pool',
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          // Row 2: New Inflow & Paid
+          Row(
+            children: [
+              Expanded(
+                child: _buildCompactKpiTile(
+                  title: 'New Inflow',
+                  value: newCount,
+                  icon: Icons.trending_up_rounded,
+                  color: const Color(0xFFF59E0B),
+                  badge: 'New',
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _buildCompactKpiTile(
+                  title: 'Paid / Won',
+                  value: paidCount,
+                  icon: Icons.check_circle_rounded,
+                  color: const Color(0xFF10B981),
+                  badge: 'Won',
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          // Row 3: Active Staff Team Banner
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFDF2F8),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: const Color(0xFFFCE7F3)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.badge_rounded, size: 14, color: Color(0xFFDB2777)),
+                const SizedBox(width: 6),
+                Text(
+                  'Active Team: $staffCount Members',
+                  style: const TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFFBE185D),
+                  ),
+                ),
+                const Spacer(),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFDB2777).withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(5),
+                  ),
+                  child: const Text(
+                    'Active',
+                    style: TextStyle(
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFFDB2777),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCompactKpiTile({
+    required String title,
+    required String value,
+    required IconData icon,
+    required Color color,
+    required String badge,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.04),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withValues(alpha: 0.12)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(5),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(7),
+                ),
+                child: Icon(icon, color: color, size: 14),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(5),
+                ),
+                child: Text(
+                  badge,
+                  style: TextStyle(
+                    fontSize: 9,
+                    fontWeight: FontWeight.w800,
+                    color: color,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            value,
+            style: const TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w800,
+              color: AppColors.textPrimary,
+              height: 1.1,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            title,
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFF64748B),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildKpiCard({
@@ -629,9 +814,9 @@ class _SheetsListScreenState extends State<SheetsListScreen> {
                   ),
                 ],
               ),
-              const SizedBox(height: 10),
-              Expanded(
-                child: Text(
+              if (desc.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(
                   desc,
                   style: const TextStyle(
                     fontSize: 12.5,
@@ -641,8 +826,8 @@ class _SheetsListScreenState extends State<SheetsListScreen> {
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                 ),
-              ),
-              const SizedBox(height: 8),
+              ],
+              const SizedBox(height: 12),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [

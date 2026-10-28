@@ -27,6 +27,38 @@ class _SpreadsheetScreenState extends State<SpreadsheetScreen> {
 
   final ScrollController _horizontalController = ScrollController();
   final ScrollController _verticalController = ScrollController();
+  final TextEditingController _searchController = TextEditingController();
+
+  int get _sheetTotalCount {
+    if (_sheet == null) return 0;
+    return _sheet!.rows.where((r) => r.id > 0 || !r.leadName.startsWith('Lead #')).length;
+  }
+
+  int get _sheetNewCount {
+    if (_sheet == null) return 0;
+    return _sheet!.rows.where((r) => (r.id > 0 || !r.leadName.startsWith('Lead #')) && r.status.toLowerCase().contains('new')).length;
+  }
+
+  int get _sheetInProgressCount {
+    if (_sheet == null) return 0;
+    return _sheet!.rows.where((r) => (r.id > 0 || !r.leadName.startsWith('Lead #')) && (r.status.toLowerCase().contains('progress') || r.status.toLowerCase().contains('contacted'))).length;
+  }
+
+  int get _sheetClosedCount {
+    if (_sheet == null) return 0;
+    return _sheet!.rows.where((r) => (r.id > 0 || !r.leadName.startsWith('Lead #')) && (r.status.toLowerCase().contains('closed') || r.status.toLowerCase().contains('paid') || r.status.toLowerCase().contains('won'))).length;
+  }
+
+  int get _sheetTotalPipelineAmount {
+    if (_sheet == null) return 0;
+    int total = 0;
+    for (var r in _sheet!.rows) {
+      if (r.id <= 0 && r.leadName.startsWith('Lead #')) continue;
+      final amt = r.data['Working Amount'] ?? r.data['working_amount'] ?? '';
+      total += int.tryParse(amt.toString().replaceAll(',', '').replaceAll(' ', '').replaceAll('₹', '')) ?? 0;
+    }
+    return total;
+  }
 
   @override
   void initState() {
@@ -52,6 +84,7 @@ class _SpreadsheetScreenState extends State<SpreadsheetScreen> {
 
   @override
   void dispose() {
+    _searchController.dispose();
     _horizontalController.dispose();
     _verticalController.dispose();
     super.dispose();
@@ -1257,123 +1290,196 @@ class _SpreadsheetScreenState extends State<SpreadsheetScreen> {
         ),
         backgroundColor: Colors.white,
         elevation: 0,
-        actions: [
-          // Toggle View Button (Cards vs Table)
-          IconButton(
-            tooltip: _isTableView ? 'Switch to Cards View' : 'Switch to Table View',
-            icon: Icon(
-              _isTableView ? Icons.grid_view_rounded : Icons.table_chart_rounded,
-              color: AppColors.primary,
-            ),
-            onPressed: () {
-              setState(() {
-                _isTableView = !_isTableView;
-              });
-            },
-          ),
-          IconButton(
-            tooltip: 'Refresh',
-            icon: const Icon(Icons.refresh_rounded, color: AppColors.textPrimary),
-            onPressed: _fetchSheetData,
-          ),
-          if (_isManager) ...[
-            // Manager: Add Lead to Sheet (POST api/add_row)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
-              child: ElevatedButton.icon(
-                onPressed: _showAddLeadDialog,
-                icon: const Icon(Icons.person_add_rounded, size: 16),
-                label: const Text('Add Lead', style: TextStyle(fontSize: 12)),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.primary,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                ),
-              ),
-            ),
-            // Manager: Assign to Staff
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
-              child: OutlinedButton.icon(
-                onPressed: _showAssignToStaffDialog,
-                icon: const Icon(Icons.person_add_alt_1_rounded, size: 16),
-                label: const Text('Assign Staff', style: TextStyle(fontSize: 12)),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: AppColors.primary,
-                  side: const BorderSide(color: AppColors.primary),
-                  padding: const EdgeInsets.symmetric(horizontal: 10),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                ),
-              ),
-            ),
-          ],
-
-          // Accounts Assignment Indicator & Action (Manager or Executive)
-          if (_assignedAccountsUser != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 8.0, bottom: 8.0, right: 12.0),
-              child: InkWell(
-                onTap: (_isManager || _isExecutive) ? _showAssignToAccountsDialog : null,
-                borderRadius: BorderRadius.circular(8),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFD1FAE5),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: const Color(0xFFA7F3D0)),
+        actions: isDesktop
+            ? [
+                // DESKTOP WIDESCREEN ACTIONS (100% UNCHANGED)
+                // Toggle View Button (Cards vs Table)
+                IconButton(
+                  tooltip: _isTableView ? 'Switch to Cards View' : 'Switch to Table View',
+                  icon: Icon(
+                    _isTableView ? Icons.grid_view_rounded : Icons.table_chart_rounded,
+                    color: AppColors.primary,
                   ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.account_balance_wallet_rounded, size: 15, color: Color(0xFF059669)),
-                      const SizedBox(width: 6),
-                      Text(
-                        'Accounts: ${_assignedAccountsUser!.name}',
-                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF065F46)),
+                  onPressed: () {
+                    setState(() {
+                      _isTableView = !_isTableView;
+                    });
+                  },
+                ),
+                IconButton(
+                  tooltip: 'Refresh',
+                  icon: const Icon(Icons.refresh_rounded, color: AppColors.textPrimary),
+                  onPressed: _fetchSheetData,
+                ),
+                if (_isManager) ...[
+                  // Manager: Add Lead to Sheet (POST api/add_row)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+                    child: ElevatedButton.icon(
+                      onPressed: _showAddLeadDialog,
+                      icon: const Icon(Icons.person_add_rounded, size: 16),
+                      label: const Text('Add Lead', style: TextStyle(fontSize: 12)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.primary,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                       ),
-                      if (_isManager || _isExecutive) ...[
-                        const SizedBox(width: 6),
-                        const Icon(Icons.edit_outlined, size: 13, color: Color(0xFF059669)),
+                    ),
+                  ),
+                  // Manager: Assign to Staff
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+                    child: OutlinedButton.icon(
+                      onPressed: _showAssignToStaffDialog,
+                      icon: const Icon(Icons.person_add_alt_1_rounded, size: 16),
+                      label: const Text('Assign Staff', style: TextStyle(fontSize: 12)),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.primary,
+                        side: const BorderSide(color: AppColors.primary),
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                    ),
+                  ),
+                ],
+
+                // Accounts Assignment Indicator & Action (Manager or Executive)
+                if (_assignedAccountsUser != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8.0, bottom: 8.0, right: 12.0),
+                    child: InkWell(
+                      onTap: (_isManager || _isExecutive) ? _showAssignToAccountsDialog : null,
+                      borderRadius: BorderRadius.circular(8),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFD1FAE5),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: const Color(0xFFA7F3D0)),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.account_balance_wallet_rounded, size: 15, color: Color(0xFF059669)),
+                            const SizedBox(width: 6),
+                            Text(
+                              'Accounts: ${_assignedAccountsUser!.name}',
+                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF065F46)),
+                            ),
+                            if (_isManager || _isExecutive) ...[
+                              const SizedBox(width: 6),
+                              const Icon(Icons.edit_outlined, size: 13, color: Color(0xFF059669)),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+                  )
+                else ...[
+                  if (_isManager)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8.0, bottom: 8.0, right: 12.0),
+                      child: OutlinedButton.icon(
+                        onPressed: _showAssignToAccountsDialog,
+                        icon: const Icon(Icons.account_balance_wallet_outlined, size: 16),
+                        label: const Text('Assign Accounts', style: TextStyle(fontSize: 12)),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: AppColors.success,
+                          side: const BorderSide(color: AppColors.success),
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        ),
+                      ),
+                    )
+                  else if (_isExecutive)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8.0, bottom: 8.0, right: 12.0),
+                      child: ElevatedButton.icon(
+                        onPressed: _showAssignToAccountsDialog,
+                        icon: const Icon(Icons.send_rounded, size: 16),
+                        label: const Text('Send to Accounts', style: TextStyle(fontSize: 12)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppColors.success,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        ),
+                      ),
+                    ),
+                ],
+              ]
+            : [
+                // MOBILE ADAPTIVE CLEAN ACTIONS (ZERO OVERFLOW)
+                IconButton(
+                  tooltip: _isTableView ? 'Switch to Cards' : 'Switch to Table',
+                  icon: Icon(
+                    _isTableView ? Icons.grid_view_rounded : Icons.table_chart_rounded,
+                    color: AppColors.primary,
+                    size: 22,
+                  ),
+                  onPressed: () {
+                    setState(() {
+                      _isTableView = !_isTableView;
+                    });
+                  },
+                ),
+                IconButton(
+                  tooltip: 'Refresh',
+                  icon: const Icon(Icons.refresh_rounded, color: AppColors.textPrimary, size: 22),
+                  onPressed: _fetchSheetData,
+                ),
+                if (_isManager || _isExecutive)
+                  PopupMenuButton<String>(
+                    icon: const Icon(Icons.more_vert_rounded, color: AppColors.textPrimary, size: 22),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    onSelected: (val) {
+                      if (val == 'add_lead') _showAddLeadDialog();
+                      if (val == 'assign_staff') _showAssignToStaffDialog();
+                      if (val == 'assign_accounts') _showAssignToAccountsDialog();
+                    },
+                    itemBuilder: (ctx) => [
+                      if (_isManager) ...[
+                        const PopupMenuItem(
+                          value: 'add_lead',
+                          child: Row(
+                            children: [
+                              Icon(Icons.person_add_rounded, size: 18, color: AppColors.primary),
+                              SizedBox(width: 10),
+                              Text('Add Lead', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+                            ],
+                          ),
+                        ),
+                        const PopupMenuItem(
+                          value: 'assign_staff',
+                          child: Row(
+                            children: [
+                              Icon(Icons.person_add_alt_1_outlined, size: 18, color: AppColors.primary),
+                              SizedBox(width: 10),
+                              Text('Assign Staff', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+                            ],
+                          ),
+                        ),
                       ],
+                      if (_isManager || _isExecutive)
+                        PopupMenuItem(
+                          value: 'assign_accounts',
+                          child: Row(
+                            children: [
+                              const Icon(Icons.account_balance_wallet_outlined, size: 18, color: Color(0xFF059669)),
+                              const SizedBox(width: 10),
+                              Text(
+                                _assignedAccountsUser != null
+                                    ? 'Accounts: ${_assignedAccountsUser!.name}'
+                                    : 'Assign Accounts',
+                                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                              ),
+                            ],
+                          ),
+                        ),
                     ],
                   ),
-                ),
-              ),
-            )
-          else ...[
-            if (_isManager)
-              Padding(
-                padding: const EdgeInsets.only(top: 8.0, bottom: 8.0, right: 12.0),
-                child: OutlinedButton.icon(
-                  onPressed: _showAssignToAccountsDialog,
-                  icon: const Icon(Icons.account_balance_wallet_outlined, size: 16),
-                  label: const Text('Assign Accounts', style: TextStyle(fontSize: 12)),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.success,
-                    side: const BorderSide(color: AppColors.success),
-                    padding: const EdgeInsets.symmetric(horizontal: 10),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  ),
-                ),
-              )
-            else if (_isExecutive)
-              Padding(
-                padding: const EdgeInsets.only(top: 8.0, bottom: 8.0, right: 12.0),
-                child: ElevatedButton.icon(
-                  onPressed: _showAssignToAccountsDialog,
-                  icon: const Icon(Icons.send_rounded, size: 16),
-                  label: const Text('Send to Accounts', style: TextStyle(fontSize: 12)),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.success,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  ),
-                ),
-              ),
-          ],
-        ],
+              ],
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
@@ -1404,60 +1510,16 @@ class _SpreadsheetScreenState extends State<SpreadsheetScreen> {
                 )
               : Column(
                   children: [
-                    // Top Sheet KPI Dashboard Overview (Counts & Metrics)
-                    _buildSheetStatsOverview(isDesktop),
+                    if (isDesktop) ...[
+                      // Top Sheet KPI Dashboard Overview (Counts & Metrics on Desktop)
+                      _buildSheetStatsOverview(isDesktop),
 
-                    // Top Search & Filter Bar
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                      decoration: const BoxDecoration(
-                        color: Colors.white,
-                        border: Border(bottom: BorderSide(color: Color(0xFFE2E8F0))),
-                      ),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              decoration: InputDecoration(
-                                hintText: 'Search leads in this sheet...',
-                                hintStyle: const TextStyle(color: Color(0xFF94A3B8), fontSize: 13),
-                                prefixIcon: const Icon(Icons.search_rounded, size: 18, color: AppColors.primary),
-                                isDense: true,
-                                contentPadding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
-                                border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(10),
-                                  borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
-                                ),
-                                enabledBorder: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(10),
-                                  borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
-                                ),
-                                filled: true,
-                                fillColor: const Color(0xFFF8FAFC),
-                              ),
-                              onChanged: (val) {
-                                setState(() => _searchQuery = val);
-                              },
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          SingleChildScrollView(
-                            scrollDirection: Axis.horizontal,
-                            child: Row(
-                              children: [
-                                _buildStatusChip('All', 'all'),
-                                const SizedBox(width: 6),
-                                _buildStatusChip('New', 'new'),
-                                const SizedBox(width: 6),
-                                _buildStatusChip('In Progress', 'in_progress'),
-                                const SizedBox(width: 6),
-                                _buildStatusChip('Closed', 'closed'),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
+                      // Desktop Search & Filter Bar (Side-by-side)
+                      _buildDesktopSearchFilterBar(),
+                    ] else ...[
+                      // Mobile Adaptive Search & Filter Section (Full-width search + counts chips)
+                      _buildMobileTopSection(),
+                    ],
 
                     // Main View (Cards View or Excel Table View)
                     Expanded(
@@ -1476,6 +1538,286 @@ class _SpreadsheetScreenState extends State<SpreadsheetScreen> {
               foregroundColor: Colors.white,
             )
           : null,
+    );
+  }
+
+  // =========================================================================
+  // DESKTOP SEARCH & FILTER BAR (Widescreen Side-by-side, 100% UNCHANGED)
+  // =========================================================================
+  Widget _buildDesktopSearchFilterBar() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(bottom: BorderSide(color: Color(0xFFE2E8F0))),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _searchController,
+              decoration: InputDecoration(
+                hintText: 'Search leads in this sheet...',
+                hintStyle: const TextStyle(color: Color(0xFF94A3B8), fontSize: 13),
+                prefixIcon: const Icon(Icons.search_rounded, size: 18, color: AppColors.primary),
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
+                ),
+                filled: true,
+                fillColor: const Color(0xFFF8FAFC),
+              ),
+              onChanged: (val) {
+                setState(() => _searchQuery = val);
+              },
+            ),
+          ),
+          const SizedBox(width: 12),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                _buildStatusChip('All', 'all'),
+                const SizedBox(width: 6),
+                _buildStatusChip('New', 'new'),
+                const SizedBox(width: 6),
+                _buildStatusChip('In Progress', 'in_progress'),
+                const SizedBox(width: 6),
+                _buildStatusChip('Closed', 'closed'),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // =========================================================================
+  // MOBILE TOP SECTION (Full-Width Search + Scrollable Status Count Chips)
+  // Clean, zero squishing, zero overflow, native mobile app presentation!
+  // =========================================================================
+  Widget _buildMobileTopSection() {
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(bottom: BorderSide(color: Color(0xFFE2E8F0))),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Accounts Assigned Banner (if sheet is assigned to accounts)
+          if (_assignedAccountsUser != null)
+            Container(
+              margin: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: const Color(0xFFECFDF5),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFA7F3D0)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.account_balance_wallet_rounded, size: 16, color: Color(0xFF059669)),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Assigned to Accounts: ${_assignedAccountsUser!.name}',
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF065F46)),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  if (_isManager || _isExecutive)
+                    GestureDetector(
+                      onTap: _showAssignToAccountsDialog,
+                      child: const Text(
+                        'Change',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xFF059669),
+                          decoration: TextDecoration.underline,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+
+          // Full-width Search Input
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
+            child: TextField(
+              controller: _searchController,
+              decoration: InputDecoration(
+                hintText: 'Search leads in this sheet...',
+                hintStyle: const TextStyle(color: Color(0xFF94A3B8), fontSize: 13),
+                prefixIcon: const Icon(Icons.search_rounded, size: 20, color: AppColors.primary),
+                suffixIcon: _searchQuery.isNotEmpty
+                    ? IconButton(
+                        icon: const Icon(Icons.cancel_rounded, size: 18, color: Color(0xFF94A3B8)),
+                        onPressed: () {
+                          _searchController.clear();
+                          setState(() => _searchQuery = '');
+                        },
+                      )
+                    : null,
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: AppColors.primary, width: 1.5),
+                ),
+                filled: true,
+                fillColor: const Color(0xFFF8FAFC),
+              ),
+              onChanged: (val) {
+                setState(() => _searchQuery = val);
+              },
+            ),
+          ),
+
+          // Horizontal Filter Chips with Status Counts
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+            child: Row(
+              children: [
+                _buildMobileStatusChip(
+                  label: 'All',
+                  value: 'all',
+                  count: _sheetTotalCount,
+                  color: const Color(0xFF3B82F6),
+                ),
+                const SizedBox(width: 8),
+                _buildMobileStatusChip(
+                  label: 'New',
+                  value: 'new',
+                  count: _sheetNewCount,
+                  color: const Color(0xFFF59E0B),
+                ),
+                const SizedBox(width: 8),
+                _buildMobileStatusChip(
+                  label: 'In Progress',
+                  value: 'in_progress',
+                  count: _sheetInProgressCount,
+                  color: const Color(0xFF8B5CF6),
+                ),
+                const SizedBox(width: 8),
+                _buildMobileStatusChip(
+                  label: 'Closed',
+                  value: 'closed',
+                  count: _sheetClosedCount,
+                  color: const Color(0xFF10B981),
+                ),
+                if (_sheetTotalPipelineAmount > 0) ...[
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE0F2FE),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: const Color(0xFFBAE6FD)),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.currency_rupee_rounded, size: 13, color: Color(0xFF0369A1)),
+                        const SizedBox(width: 2),
+                        Text(
+                          '₹$_sheetTotalPipelineAmount Pipeline',
+                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF0369A1)),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMobileStatusChip({
+    required String label,
+    required String value,
+    required int count,
+    required Color color,
+  }) {
+    final isSelected = _selectedStatusFilter == value;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () {
+          setState(() => _selectedStatusFilter = value);
+        },
+        borderRadius: BorderRadius.circular(20),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: isSelected ? color : Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+              color: isSelected ? color : const Color(0xFFCBD5E1),
+              width: isSelected ? 1.5 : 1,
+            ),
+            boxShadow: isSelected
+                ? [
+                    BoxShadow(
+                      color: color.withValues(alpha: 0.25),
+                      blurRadius: 6,
+                      offset: const Offset(0, 2),
+                    ),
+                  ]
+                : null,
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: isSelected ? FontWeight.w700 : FontWeight.w600,
+                  color: isSelected ? Colors.white : AppColors.textPrimary,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                decoration: BoxDecoration(
+                  color: isSelected ? Colors.white.withValues(alpha: 0.25) : color.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  count.toString(),
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    color: isSelected ? Colors.white : color,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -1500,56 +1842,44 @@ class _SpreadsheetScreenState extends State<SpreadsheetScreen> {
   }
 
   // =========================================================================
-  // TOP SHEET KPI DASHBOARD OVERVIEW (Counts & Metrics)
+  // TOP SHEET KPI DASHBOARD OVERVIEW (Counts & Metrics on Desktop)
   // =========================================================================
   Widget _buildSheetStatsOverview(bool isDesktop) {
     if (_sheet == null) return const SizedBox();
 
-    final allRows = _sheet!.rows.where((r) => r.id > 0 || !r.leadName.startsWith('Lead #')).toList();
-    final totalCount = allRows.length;
-    final newCount = allRows.where((r) => r.status.toLowerCase().contains('new')).length;
-    final inProgressCount = allRows.where((r) => r.status.toLowerCase().contains('progress') || r.status.toLowerCase().contains('contacted')).length;
-    final closedCount = allRows.where((r) => r.status.toLowerCase().contains('closed') || r.status.toLowerCase().contains('paid') || r.status.toLowerCase().contains('won')).length;
-
-    int totalAmount = 0;
-    for (var r in allRows) {
-      final amt = r.data['Working Amount'] ?? r.data['working_amount'] ?? '';
-      totalAmount += int.tryParse(amt.toString().replaceAll(',', '').replaceAll(' ', '').replaceAll('₹', '')) ?? 0;
-    }
-
     final statItems = [
       _buildSheetStatCard(
         label: 'Total Leads',
-        count: totalCount.toString(),
+        count: _sheetTotalCount.toString(),
         icon: Icons.people_alt_rounded,
         color: const Color(0xFF3B82F6),
         filterKey: 'all',
       ),
       _buildSheetStatCard(
         label: 'New Leads',
-        count: newCount.toString(),
+        count: _sheetNewCount.toString(),
         icon: Icons.fiber_new_rounded,
         color: const Color(0xFFF59E0B),
         filterKey: 'new',
       ),
       _buildSheetStatCard(
         label: 'In Progress',
-        count: inProgressCount.toString(),
+        count: _sheetInProgressCount.toString(),
         icon: Icons.trending_up_rounded,
         color: const Color(0xFF8B5CF6),
         filterKey: 'in_progress',
       ),
       _buildSheetStatCard(
         label: 'Closed / Paid',
-        count: closedCount.toString(),
+        count: _sheetClosedCount.toString(),
         icon: Icons.check_circle_rounded,
         color: const Color(0xFF10B981),
         filterKey: 'closed',
       ),
-      if (totalAmount > 0)
+      if (_sheetTotalPipelineAmount > 0)
         _buildSheetStatCard(
           label: 'Total Pipeline',
-          count: '₹$totalAmount',
+          count: '₹$_sheetTotalPipelineAmount',
           icon: Icons.currency_rupee_rounded,
           color: const Color(0xFF0EA5E9),
           filterKey: null,
@@ -1684,36 +2014,70 @@ class _SpreadsheetScreenState extends State<SpreadsheetScreen> {
     final rows = _filteredRows;
 
     if (rows.isEmpty) {
+      final hasActiveFilter = _searchQuery.trim().isNotEmpty || _selectedStatusFilter != 'all';
       return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.inbox_outlined, size: 56, color: Colors.grey.shade400),
-            const SizedBox(height: 12),
-            const Text(
-              'No leads matching criteria',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
-            ),
-            const SizedBox(height: 6),
-            const Text(
-              'Try clearing search filters or add new leads.',
-              style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
-            ),
-            if (_isManager) ...[
-              const SizedBox(height: 16),
-              ElevatedButton.icon(
-                onPressed: _showAddLeadDialog,
-                icon: const Icon(Icons.person_add_rounded, size: 18),
-                label: const Text('Add Candidate Lead'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.primary,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                ),
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                hasActiveFilter ? Icons.search_off_rounded : Icons.inbox_outlined,
+                size: 56,
+                color: Colors.grey.shade400,
               ),
+              const SizedBox(height: 12),
+              Text(
+                hasActiveFilter
+                    ? (_searchQuery.trim().isNotEmpty
+                        ? 'No leads matching "$_searchQuery"'
+                        : 'No leads with status "$_selectedStatusFilter"')
+                    : 'No leads matching criteria',
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                hasActiveFilter ? 'Try clearing filters or search query.' : 'Try clearing search filters or add new leads.',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
+              ),
+              if (hasActiveFilter) ...[
+                const SizedBox(height: 16),
+                OutlinedButton.icon(
+                  onPressed: () {
+                    setState(() {
+                      _searchQuery = '';
+                      _searchController.clear();
+                      _selectedStatusFilter = 'all';
+                    });
+                  },
+                  icon: const Icon(Icons.filter_alt_off_rounded, size: 16),
+                  label: const Text('Clear All Filters'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.primary,
+                    side: const BorderSide(color: AppColors.primary),
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
+              ],
+              if (_isManager) ...[
+                const SizedBox(height: 12),
+                ElevatedButton.icon(
+                  onPressed: _showAddLeadDialog,
+                  icon: const Icon(Icons.person_add_rounded, size: 18),
+                  label: const Text('Add Candidate Lead'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.primary,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       );
     }
@@ -1885,7 +2249,7 @@ class _SpreadsheetScreenState extends State<SpreadsheetScreen> {
                     ),
                 ],
               ),
-              const Spacer(),
+              const SizedBox(height: 14),
 
               // Row 3: Action buttons
               Row(
