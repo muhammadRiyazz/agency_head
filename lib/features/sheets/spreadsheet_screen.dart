@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:agency_head/core/theme/app_colors.dart';
@@ -28,6 +29,15 @@ class _SpreadsheetScreenState extends State<SpreadsheetScreen> {
   final ScrollController _horizontalController = ScrollController();
   final ScrollController _verticalController = ScrollController();
   final TextEditingController _searchController = TextEditingController();
+
+  // Inline Spreadsheet Row Adding & Editing State (No Modal Dialogs!)
+  bool _isAddingInlineRow = false;
+  int? _editingRowId;
+  bool _isSavingInline = false;
+  final Map<String, TextEditingController> _newRowControllers = {};
+  String _newRowStatus = 'new';
+  final Map<String, TextEditingController> _editRowControllers = {};
+  String _editRowStatus = 'new';
 
   int get _sheetTotalCount {
     if (_sheet == null) return 0;
@@ -73,10 +83,11 @@ class _SpreadsheetScreenState extends State<SpreadsheetScreen> {
     final groupId = int.tryParse(user?['group_id']?.toString() ?? '0') ?? 0;
     final isStaffOrAccounts = (groupId == 4 || groupId == 5 || groupId == 2);
 
+    final isDesktop = ResponsiveLayout.isDesktop(context);
     setState(() {
       _currentUser = user;
-      // Default view: Cards for Manager, Table for Staff & Accounts
-      _isTableView = isStaffOrAccounts;
+      // Default view: Table on Desktop or for Staff & Accounts
+      _isTableView = isDesktop || isStaffOrAccounts;
     });
 
     _fetchSheetData();
@@ -87,6 +98,12 @@ class _SpreadsheetScreenState extends State<SpreadsheetScreen> {
     _searchController.dispose();
     _horizontalController.dispose();
     _verticalController.dispose();
+    for (var ctrl in _newRowControllers.values) {
+      ctrl.dispose();
+    }
+    for (var ctrl in _editRowControllers.values) {
+      ctrl.dispose();
+    }
     super.dispose();
   }
 
@@ -192,438 +209,234 @@ class _SpreadsheetScreenState extends State<SpreadsheetScreen> {
   }
 
   // =========================================================================
-  // ADD LEAD TO SHEET (Manager Action - All Columns from API)
-  // Endpoint: POST api/add_row
+  // INLINE SPREADSHEET ROW ADDING & EDITING (No Modal Dialogs!)
   // =========================================================================
-  Future<void> _showAddLeadDialog() async {
-    final List<ApiColumn> columns = (_sheet != null && _sheet!.columns.isNotEmpty)
+
+  /// Activates the inline "New Lead" row right at the top of the spreadsheet grid.
+  void _startInlineAddLead() {
+    final cols = (_sheet != null && _sheet!.columns.isNotEmpty)
         ? _sheet!.columns
-        : [
-            ApiColumn(id: 1, columnKey: 'col_1', columnName: 'Number', columnType: 'text', userType: 'common'),
-            ApiColumn(id: 2, columnKey: 'col_2', columnName: 'Name', columnType: 'text', userType: 'common'),
-            ApiColumn(id: 3, columnKey: 'col_3', columnName: 'Country', columnType: 'text', userType: 'common'),
-            ApiColumn(id: 4, columnKey: 'col_4', columnName: 'Working Amount', columnType: 'number', userType: 'executive'),
-            ApiColumn(id: 5, columnKey: 'col_5', columnName: 'Agency Name', columnType: 'text', userType: 'executive'),
-            ApiColumn(id: 6, columnKey: 'col_6', columnName: 'Process Type', columnType: 'text', userType: 'executive'),
-            ApiColumn(id: 7, columnKey: 'col_7', columnName: 'Percentage/ Service Charge', columnType: 'number', userType: 'executive'),
-            ApiColumn(id: 8, columnKey: 'col_8', columnName: 'Bank', columnType: 'text', userType: 'executive'),
-            ApiColumn(id: 9, columnKey: 'col_9', columnName: 'Own Work', columnType: 'text', userType: 'executive'),
-            ApiColumn(id: 10, columnKey: 'col_10', columnName: 'Advance Paid/Not paid', columnType: 'text', userType: 'common'),
-            ApiColumn(id: 11, columnKey: 'col_11', columnName: 'Bank Name/ Account Number', columnType: 'number', userType: 'executive'),
-            ApiColumn(id: 12, columnKey: 'col_12', columnName: 'Cash in Hand', columnType: 'number', userType: 'executive'),
-            ApiColumn(id: 13, columnKey: 'col_13', columnName: 'Total Credit Amount', columnType: 'number', userType: 'executive'),
-            ApiColumn(id: 14, columnKey: 'col_14', columnName: 'Bank / Collected', columnType: 'text', userType: 'accounts'),
-            ApiColumn(id: 15, columnKey: 'col_15', columnName: 'Company Payment', columnType: 'text', userType: 'accounts'),
-            ApiColumn(id: 16, columnKey: 'col_16', columnName: 'Profit', columnType: 'text', userType: 'accounts'),
-            ApiColumn(id: 17, columnKey: 'col_17', columnName: 'Agency Payment', columnType: 'text', userType: 'accounts'),
-            ApiColumn(id: 18, columnKey: 'col_18', columnName: 'Status', columnType: 'dropdown', userType: 'common', options: ['paid', 'unpaid', 'new', 'in_progress', 'closed']),
-          ];
+        : <ApiColumn>[];
 
-    final Map<String, TextEditingController> colControllers = {};
-    for (var col in columns) {
-      colControllers[col.columnName] = TextEditingController();
-    }
-
-    String status = 'new';
-    int? selectedAssignedTo;
-    List<Map<String, dynamic>> staffList = [];
-    bool isStaffLoading = true;
-    bool isSubmitting = false;
-    String? formError;
-
-    // Fetch staff for optional assignment
-    ApiService.getStaff().then((res) {
-      if (res['status'] == true && res['data'] != null) {
-        staffList = List<Map<String, dynamic>>.from(res['data']).where((s) {
-          final gId = int.tryParse(s['group_id']?.toString() ?? '0') ?? 0;
-          return gId == 4 || gId == 5;
-        }).toList();
+    // Initialize or clear controllers for all columns
+    for (var col in cols) {
+      final colLower = col.columnName.trim().toLowerCase();
+      final isStatus = colLower == 'status' || colLower.contains('status') || col.columnKey.toLowerCase().contains('status');
+      final isDrop = _isDropdownColumn(col);
+      String defaultText = '';
+      if (isStatus) {
+        defaultText = 'New';
+      } else if (isDrop && col.options.isNotEmpty) {
+        defaultText = col.options.first;
       }
-      isStaffLoading = false;
-    }).catchError((_) {
-      isStaffLoading = false;
+
+      if (_newRowControllers.containsKey(col.columnKey)) {
+        _newRowControllers[col.columnKey]!.text = defaultText;
+      } else {
+        _newRowControllers[col.columnKey] = TextEditingController(text: defaultText);
+      }
+      if (_newRowControllers.containsKey(col.columnName)) {
+        _newRowControllers[col.columnName]!.text = defaultText;
+      } else {
+        _newRowControllers[col.columnName] = _newRowControllers[col.columnKey]!;
+      }
+    }
+    _newRowStatus = 'new';
+
+    setState(() {
+      _isTableView = true; // Switch to table view so boxes are visible
+      _isAddingInlineRow = true;
+      _editingRowId = null; // Exit any existing row edit
     });
 
-    final commonCols = columns.where((c) => c.isCommon && c.columnName.toLowerCase() != 'status').toList();
-    final executiveCols = columns.where((c) => c.isExecutive).toList();
-    final accountsCols = columns.where((c) => c.isAccounts).toList();
-    final customCols = columns.where((c) => !c.isCommon && !c.isExecutive && !c.isAccounts && c.columnName.toLowerCase() != 'status').toList();
+    if (_verticalController.hasClients) {
+      _verticalController.animateTo(0, duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
+    }
+  }
 
-    await showDialog(
-      context: context,
-      builder: (ctx) {
-        final screenWidth = MediaQuery.of(ctx).size.width;
-        final dialogWidth = screenWidth > 780 ? 700.0 : screenWidth * 0.95;
+  void _cancelInlineAddLead() {
+    setState(() {
+      _isAddingInlineRow = false;
+    });
+  }
 
-        return StatefulBuilder(
-          builder: (dialogContext, setDialogState) {
-            Widget buildFieldInput(ApiColumn col) {
-              final ctrl = colControllers[col.columnName]!;
-              final colLower = col.columnName.toLowerCase();
-              final isRequired = colLower == 'name' || colLower == 'number' || colLower == 'candidate name' || colLower == 'phone number';
+  Future<void> _saveInlineAddLead() async {
+    if (_sheet == null) return;
 
-              IconData icon;
-              if (colLower.contains('phone') || colLower == 'number') {
-                icon = Icons.phone_outlined;
-              } else if (colLower.contains('name') && !colLower.contains('agency')) {
-                icon = Icons.person_outline;
-              } else if (colLower.contains('country')) {
-                icon = Icons.public;
-              } else if (colLower.contains('amount') || colLower.contains('profit') || colLower.contains('payment') || colLower.contains('charge') || colLower.contains('cash') || colLower.contains('credit')) {
-                icon = Icons.currency_rupee;
-              } else if (colLower.contains('agency')) {
-                icon = Icons.business_outlined;
-              } else if (colLower.contains('bank')) {
-                icon = Icons.account_balance_outlined;
-              } else if (colLower.contains('work') || colLower.contains('process')) {
-                icon = Icons.work_outline;
-              } else {
-                icon = Icons.edit_note_rounded;
-              }
+    final Map<String, dynamic> rowData = {};
+    for (var col in _sheet!.columns) {
+      final text = _newRowControllers[col.columnKey]?.text.trim() ??
+                   _newRowControllers[col.columnName]?.text.trim() ?? '';
+      if (text.isNotEmpty) {
+        rowData[col.columnName] = text;
+        rowData[col.columnKey] = text;
+      }
+    }
 
-              final isNumber = col.columnType == 'number' ||
-                  colLower.contains('amount') ||
-                  colLower.contains('charge') ||
-                  colLower.contains('profit') ||
-                  colLower.contains('credit') ||
-                  colLower.contains('cash') ||
-                  colLower == 'number';
+    if (rowData.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please enter at least Name or Number in the row boxes before saving.'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+      return;
+    }
 
-              if (col.options != null && col.options!.isNotEmpty) {
-                return DropdownButtonFormField<String>(
-                  value: col.options!.contains(ctrl.text) ? ctrl.text : null,
-                  decoration: InputDecoration(
-                    labelText: col.columnName + (isRequired ? ' *' : ''),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                    filled: true,
-                    fillColor: const Color(0xFFF8FAFC),
-                    prefixIcon: Icon(icon, size: 18),
-                    isDense: true,
-                  ),
-                  items: col.options!.map((opt) => DropdownMenuItem(value: opt, child: Text(opt))).toList(),
-                  onChanged: (val) {
-                    if (val != null) setDialogState(() => ctrl.text = val);
-                  },
-                );
-              }
+    // Read status directly from text field or default to 'new'
+    final rawStatus = (rowData['Status'] ?? rowData['status'] ?? _newRowStatus).toString();
+    final statusVal = rawStatus.toLowerCase().replaceAll(' ', '_');
+    rowData['Status'] = _formatStatusLabel(rawStatus);
+    rowData['status'] = statusVal;
 
-              return TextFormField(
-                controller: ctrl,
-                keyboardType: isNumber ? TextInputType.number : TextInputType.text,
-                decoration: InputDecoration(
-                  labelText: col.columnName + (isRequired ? ' *' : ''),
-                  hintText: 'Enter ${col.columnName}',
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                  filled: true,
-                  fillColor: const Color(0xFFF8FAFC),
-                  prefixIcon: Icon(icon, size: 18),
-                  isDense: true,
-                ),
-              );
-            }
+    setState(() => _isSavingInline = true);
 
-            Widget buildSectionHeader(String title, IconData icon, Color color, int count) {
-              return Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-                decoration: BoxDecoration(
-                  color: color.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Row(
-                  children: [
-                    Icon(icon, size: 16, color: color),
-                    const SizedBox(width: 8),
-                    Text(
-                      title,
-                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: color),
-                    ),
-                    const Spacer(),
-                    Text(
-                      '$count fields',
-                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: color.withValues(alpha: 0.8)),
-                    ),
-                  ],
-                ),
-              );
-            }
+    try {
+      final sheetId = int.tryParse(widget.sheetId) ?? _sheet!.id;
+      final response = await ApiService.addRow(
+        sheetId: sheetId,
+        createdBy: _currentUserId,
+        status: statusVal,
+        data: rowData,
+      );
 
-            Widget buildFieldsGrid(List<ApiColumn> cols) {
-              final isWide = dialogWidth > 580;
-              return LayoutBuilder(
-                builder: (context, constraints) {
-                  final itemWidth = isWide ? (constraints.maxWidth - 12) / 2 : constraints.maxWidth;
-                  return Wrap(
-                    spacing: 12,
-                    runSpacing: 10,
-                    children: cols.map((col) {
-                      return SizedBox(
-                        width: itemWidth,
-                        child: buildFieldInput(col),
-                      );
-                    }).toList(),
-                  );
-                },
-              );
-            }
+      if (!mounted) return;
 
-            return AlertDialog(
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-              titlePadding: const EdgeInsets.fromLTRB(24, 20, 24, 12),
-              contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
-              actionsPadding: const EdgeInsets.fromLTRB(24, 12, 24, 20),
-              title: Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: AppColors.primary.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: const Icon(Icons.person_add_rounded, color: AppColors.primary, size: 22),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('Add Lead to Sheet', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 18)),
-                        Text(
-                          'Populate all sheet fields for "${_sheet?.title ?? 'this sheet'}"',
-                          style: const TextStyle(color: AppColors.textSecondary, fontSize: 12),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              content: SizedBox(
-                width: dialogWidth,
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxHeight: MediaQuery.of(ctx).size.height * 0.75,
-                  ),
-                  child: SingleChildScrollView(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (formError != null) ...[
-                          Container(
-                            padding: const EdgeInsets.all(10),
-                            decoration: BoxDecoration(
-                              color: Colors.red.shade50,
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(color: Colors.red.shade200),
-                            ),
-                            child: Row(
-                              children: [
-                                const Icon(Icons.error_outline, color: AppColors.error, size: 18),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(formError!, style: const TextStyle(color: AppColors.error, fontSize: 12.5)),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 14),
-                        ],
-
-                        // 1. General Lead Information
-                        if (commonCols.isNotEmpty) ...[
-                          buildSectionHeader('General Lead Information', Icons.person_outline, const Color(0xFF3B82F6), commonCols.length),
-                          const SizedBox(height: 10),
-                          buildFieldsGrid(commonCols),
-                          const SizedBox(height: 16),
-                        ],
-
-                        // 2. Executive Details
-                        if (executiveCols.isNotEmpty) ...[
-                          buildSectionHeader('Executive Details', Icons.work_outline_rounded, const Color(0xFFF59E0B), executiveCols.length),
-                          const SizedBox(height: 10),
-                          buildFieldsGrid(executiveCols),
-                          const SizedBox(height: 16),
-                        ],
-
-                        // 3. Accounts Details
-                        if (accountsCols.isNotEmpty) ...[
-                          buildSectionHeader('Accounts & Financials', Icons.account_balance_wallet_outlined, const Color(0xFF10B981), accountsCols.length),
-                          const SizedBox(height: 10),
-                          buildFieldsGrid(accountsCols),
-                          const SizedBox(height: 16),
-                        ],
-
-                        // 4. Custom Columns (if any)
-                        if (customCols.isNotEmpty) ...[
-                          buildSectionHeader('Custom Columns', Icons.view_column_rounded, const Color(0xFF8B5CF6), customCols.length),
-                          const SizedBox(height: 10),
-                          buildFieldsGrid(customCols),
-                          const SizedBox(height: 16),
-                        ],
-
-                        // 5. Lead Status & Assignment
-                        buildSectionHeader('Lead Status & Assignment', Icons.assignment_ind_outlined, const Color(0xFF64748B), 2),
-                        const SizedBox(height: 10),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: DropdownButtonFormField<String>(
-                                value: status,
-                                decoration: InputDecoration(
-                                  labelText: 'Lead Status',
-                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                                  filled: true,
-                                  fillColor: const Color(0xFFF8FAFC),
-                                  isDense: true,
-                                  prefixIcon: const Icon(Icons.flag_outlined, size: 18),
-                                ),
-                                items: const [
-                                  DropdownMenuItem(value: 'new', child: Text('New')),
-                                  DropdownMenuItem(value: 'in_progress', child: Text('In Progress')),
-                                  DropdownMenuItem(value: 'contacted', child: Text('Contacted')),
-                                  DropdownMenuItem(value: 'paid', child: Text('Paid')),
-                                  DropdownMenuItem(value: 'unpaid', child: Text('Unpaid')),
-                                  DropdownMenuItem(value: 'closed', child: Text('Closed')),
-                                ],
-                                onChanged: (val) {
-                                  if (val != null) setDialogState(() => status = val);
-                                },
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: DropdownButtonFormField<int?>(
-                                value: selectedAssignedTo,
-                                decoration: InputDecoration(
-                                  labelText: 'Assign to Staff (Optional)',
-                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                                  filled: true,
-                                  fillColor: const Color(0xFFF8FAFC),
-                                  isDense: true,
-                                  prefixIcon: const Icon(Icons.badge_outlined, size: 18),
-                                ),
-                                items: [
-                                  const DropdownMenuItem<int?>(value: null, child: Text('Unassigned (Pool)')),
-                                  ...staffList.map((s) {
-                                    final sId = int.tryParse(s['id'].toString()) ?? 0;
-                                    final sName = s['name'] ?? 'Staff';
-                                    final sRole = s['group_name'] ?? 'Executive';
-                                    return DropdownMenuItem<int?>(value: sId, child: Text('$sName ($sRole)'));
-                                  }),
-                                ],
-                                onChanged: (val) {
-                                  setDialogState(() => selectedAssignedTo = val);
-                                },
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: isSubmitting ? null : () => Navigator.pop(ctx),
-                  child: const Text('Cancel'),
-                ),
-                ElevatedButton(
-                  onPressed: isSubmitting
-                      ? null
-                      : () async {
-                          // Validate Name and Phone
-                          String candidateName = '';
-                          String phoneNumber = '';
-
-                          for (var col in columns) {
-                            final colLower = col.columnName.toLowerCase();
-                            if (colLower == 'name' || colLower == 'candidate name') {
-                              candidateName = colControllers[col.columnName]?.text.trim() ?? '';
-                            } else if (colLower == 'number' || colLower == 'phone' || colLower == 'phone number') {
-                              phoneNumber = colControllers[col.columnName]?.text.trim() ?? '';
-                            }
-                          }
-
-                          if (candidateName.isEmpty || phoneNumber.isEmpty) {
-                            setDialogState(() {
-                              formError = 'Candidate Name and Phone Number are required.';
-                            });
-                            return;
-                          }
-
-                          setDialogState(() {
-                            isSubmitting = true;
-                            formError = null;
-                          });
-
-                          try {
-                            final sheetId = int.tryParse(widget.sheetId) ?? 1;
-
-                            // Build payload with every column value mapped to both key and name
-                            final dataPayload = <String, dynamic>{};
-                            for (var col in columns) {
-                              final text = colControllers[col.columnName]?.text.trim() ?? '';
-                              dataPayload[col.columnName] = text;
-                              if (col.columnKey.isNotEmpty) {
-                                dataPayload[col.columnKey] = text;
-                              }
-                            }
-
-                            // Explicit standard keys
-                            dataPayload['Name'] = candidateName;
-                            dataPayload['Number'] = phoneNumber;
-                            dataPayload['Status'] = status;
-
-                            final response = await ApiService.addRow(
-                              sheetId: sheetId,
-                              createdBy: _currentUserId,
-                              assignedTo: selectedAssignedTo,
-                              status: status,
-                              data: dataPayload,
-                            );
-
-                            if (!dialogContext.mounted) return;
-
-                            if (response['status'] == true) {
-                              Navigator.pop(ctx);
-                              if (!mounted) return;
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('Lead added successfully with all details!'),
-                                  backgroundColor: AppColors.success,
-                                ),
-                              );
-                              _fetchSheetData();
-                            } else {
-                              setDialogState(() {
-                                isSubmitting = false;
-                                formError = response['message'] ?? 'Failed to add lead.';
-                              });
-                            }
-                          } catch (e) {
-                            if (!dialogContext.mounted) return;
-                            setDialogState(() {
-                              isSubmitting = false;
-                              formError = e.toString();
-                            });
-                          }
-                        },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.primary,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                  ),
-                  child: isSubmitting
-                      ? const SizedBox(height: 16, width: 16, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-                      : const Text('Add Lead'),
-                ),
-              ],
-            );
-          },
+      if (response['status'] == true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Lead added successfully to spreadsheet!'),
+            backgroundColor: AppColors.success,
+          ),
         );
-      },
-    );
+        _cancelInlineAddLead();
+        _fetchSheetData();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(response['message'] ?? 'Failed to add lead.'),
+            backgroundColor: AppColors.error,
+          ),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error adding lead: '), backgroundColor: AppColors.error),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isSavingInline = false);
+      }
+    }
+  }
+
+  /// Activates inline row editing directly in the grid boxes (No Dialog Box!)
+  void _startInlineRowEdit(ApiRow row, {String? focusColumn}) {
+    final cols = (_sheet != null && _sheet!.columns.isNotEmpty)
+        ? _sheet!.columns
+        : <ApiColumn>[];
+
+    for (var col in cols) {
+      String val = row.getValue(col);
+      final colLower = col.columnName.trim().toLowerCase();
+      final isStatus = colLower == 'status' || colLower.contains('status') || col.columnKey.toLowerCase().contains('status');
+      if (isStatus && (val.isEmpty || val.toLowerCase() == 'new') && row.status.isNotEmpty) {
+        val = _formatStatusLabel(row.status);
+      } else if (isStatus && val.isNotEmpty) {
+        val = _formatStatusLabel(val);
+      }
+
+      if (_editRowControllers.containsKey(col.columnKey)) {
+        _editRowControllers[col.columnKey]!.text = val;
+      } else {
+        _editRowControllers[col.columnKey] = TextEditingController(text: val);
+      }
+      if (_editRowControllers.containsKey(col.columnName)) {
+        _editRowControllers[col.columnName]!.text = val;
+      } else {
+        _editRowControllers[col.columnName] = _editRowControllers[col.columnKey]!;
+      }
+    }
+    _editRowStatus = row.status.isNotEmpty ? row.status.toLowerCase() : 'new';
+
+    setState(() {
+      _isTableView = true;
+      _editingRowId = row.id;
+      _isAddingInlineRow = false;
+    });
+  }
+
+  void _cancelInlineRowEdit() {
+    setState(() {
+      _editingRowId = null;
+    });
+  }
+
+  Future<void> _saveInlineRowEdit(ApiRow row) async {
+    if (_sheet == null) return;
+
+    final Map<String, dynamic> updatedData = Map.from(row.data);
+    for (var col in _sheet!.columns) {
+      final text = _editRowControllers[col.columnKey]?.text.trim() ??
+                   _editRowControllers[col.columnName]?.text.trim() ?? '';
+      updatedData[col.columnName] = text;
+      updatedData[col.columnKey] = text;
+    }
+
+    // Read status directly from text field or fallback to existing row status
+    final rawStatus = (updatedData['Status'] ?? updatedData['status'] ?? _editRowStatus ?? row.status).toString();
+    final statusVal = rawStatus.toLowerCase().replaceAll(' ', '_');
+    updatedData['Status'] = _formatStatusLabel(rawStatus);
+    updatedData['status'] = statusVal;
+
+    setState(() => _isSavingInline = true);
+
+    try {
+      final response = await ApiService.updateRow(
+        rowId: row.id,
+        data: updatedData,
+        status: statusVal,
+        role: _getUserRoleString(),
+      );
+
+      if (!mounted) return;
+
+      if (response['status'] == true) {
+        row.data.addAll(updatedData);
+        row.status = statusVal;
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Lead updated successfully in spreadsheet!'),
+            backgroundColor: AppColors.success,
+          ),
+        );
+        _cancelInlineRowEdit();
+        _fetchSheetData();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(response['message'] ?? 'Failed to update lead.'),
+            backgroundColor: AppColors.error,
+          ),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error updating lead: '), backgroundColor: AppColors.error),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isSavingInline = false);
+      }
+    }
+  }
+
+  /// Kept for backwards compatibility - redirects directly to inline add row!
+  Future<void> _showAddLeadDialog() async {
+    _startInlineAddLead();
   }
 
   // =========================================================================
@@ -1311,37 +1124,93 @@ class _SpreadsheetScreenState extends State<SpreadsheetScreen> {
                   icon: const Icon(Icons.refresh_rounded, color: AppColors.textPrimary),
                   onPressed: _fetchSheetData,
                 ),
-                if (_isManager) ...[
-                  // Manager: Add Lead to Sheet (POST api/add_row)
+                if (_isAddingInlineRow || _editingRowId != null) ...[
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
                     child: ElevatedButton.icon(
-                      onPressed: _showAddLeadDialog,
-                      icon: const Icon(Icons.person_add_rounded, size: 16),
-                      label: const Text('Add Lead', style: TextStyle(fontSize: 12)),
+                      onPressed: _isSavingInline
+                          ? null
+                          : () {
+                              if (_isAddingInlineRow) {
+                                _saveInlineAddLead();
+                              } else if (_editingRowId != null) {
+                                final rows = _filteredRows;
+                                final editingRow = rows.firstWhere(
+                                  (r) => r.id == _editingRowId,
+                                  orElse: () => _sheet!.rows.firstWhere((r) => r.id == _editingRowId, orElse: () => _sheet!.rows.first),
+                                );
+                                _saveInlineRowEdit(editingRow);
+                              }
+                            },
+                      icon: _isSavingInline
+                          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                          : const Icon(Icons.check_circle_rounded, size: 16),
+                      label: Text(
+                        _isSavingInline
+                            ? 'Saving...'
+                            : (_isAddingInlineRow ? 'Save Lead' : 'Save Row #$_editingRowId'),
+                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                      ),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.primary,
+                        backgroundColor: const Color(0xFF16A34A),
                         foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        padding: const EdgeInsets.symmetric(horizontal: 14),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        elevation: 1,
                       ),
                     ),
                   ),
-                  // Manager: Assign to Staff
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
-                    child: OutlinedButton.icon(
-                      onPressed: _showAssignToStaffDialog,
-                      icon: const Icon(Icons.person_add_alt_1_rounded, size: 16),
-                      label: const Text('Assign Staff', style: TextStyle(fontSize: 12)),
+                    child: OutlinedButton(
+                      onPressed: _isSavingInline
+                          ? null
+                          : () {
+                              if (_isAddingInlineRow) _cancelInlineAddLead();
+                              if (_editingRowId != null) _cancelInlineRowEdit();
+                            },
                       style: OutlinedButton.styleFrom(
-                        foregroundColor: AppColors.primary,
-                        side: const BorderSide(color: AppColors.primary),
+                        foregroundColor: const Color(0xFF64748B),
+                        side: const BorderSide(color: Color(0xFFCBD5E1)),
                         padding: const EdgeInsets.symmetric(horizontal: 10),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                       ),
+                      child: const Text('Cancel', style: TextStyle(fontSize: 12)),
                     ),
                   ),
+                ] else ...[
+                  if (_isManager) ...[
+                    // Manager: Add Lead to Sheet (POST api/add_row)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+                      child: ElevatedButton.icon(
+                        onPressed: _showAddLeadDialog,
+                        icon: const Icon(Icons.person_add_rounded, size: 16),
+                        label: const Text('Add Lead', style: TextStyle(fontSize: 12)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppColors.primary,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        ),
+                      ),
+                    ),
+                    // Manager: Assign to Staff
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+                      child: OutlinedButton.icon(
+                        onPressed: _showAssignToStaffDialog,
+                        icon: const Icon(Icons.person_add_alt_1_rounded, size: 16),
+                        label: const Text('Assign Staff', style: TextStyle(fontSize: 12)),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: AppColors.primary,
+                          side: const BorderSide(color: AppColors.primary),
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        ),
+                      ),
+                    ),
+                  ],
                 ],
 
                 // Accounts Assignment Indicator & Action (Manager or Executive)
@@ -1411,6 +1280,38 @@ class _SpreadsheetScreenState extends State<SpreadsheetScreen> {
               ]
             : [
                 // MOBILE ADAPTIVE CLEAN ACTIONS (ZERO OVERFLOW)
+                if (_isAddingInlineRow || _editingRowId != null) ...[
+                  IconButton(
+                    tooltip: 'Save',
+                    icon: _isSavingInline
+                        ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF16A34A)))
+                        : const Icon(Icons.check_circle_rounded, color: Color(0xFF16A34A), size: 24),
+                    onPressed: _isSavingInline
+                        ? null
+                        : () {
+                            if (_isAddingInlineRow) {
+                              _saveInlineAddLead();
+                            } else if (_editingRowId != null) {
+                              final rows = _filteredRows;
+                              final editingRow = rows.firstWhere(
+                                (r) => r.id == _editingRowId,
+                                orElse: () => _sheet!.rows.firstWhere((r) => r.id == _editingRowId, orElse: () => _sheet!.rows.first),
+                              );
+                              _saveInlineRowEdit(editingRow);
+                            }
+                          },
+                  ),
+                  IconButton(
+                    tooltip: 'Cancel',
+                    icon: const Icon(Icons.close_rounded, color: Color(0xFF64748B), size: 22),
+                    onPressed: _isSavingInline
+                        ? null
+                        : () {
+                            if (_isAddingInlineRow) _cancelInlineAddLead();
+                            if (_editingRowId != null) _cancelInlineRowEdit();
+                          },
+                  ),
+                ],
                 IconButton(
                   tooltip: _isTableView ? 'Switch to Cards' : 'Switch to Table',
                   icon: Icon(
@@ -2262,7 +2163,7 @@ class _SpreadsheetScreenState extends State<SpreadsheetScreen> {
                   Row(
                     children: [
                       InkWell(
-                        onTap: () => _openLeadDetailsPage(row, editMode: true),
+                        onTap: () => _startInlineRowEdit(row),
                         borderRadius: BorderRadius.circular(6),
                         child: Container(
                           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -2312,114 +2213,870 @@ class _SpreadsheetScreenState extends State<SpreadsheetScreen> {
   }
 
   // =========================================================================
-  // VIEW B: EXCEL SPREADSHEET TABLE GRID (Staff & Accounts Role-Filtered)
+  // VIEW B: TRUE FULL-PAGE GOOGLE SHEETS GRID
+  // Full rows & columns (data rows + empty rows filling the page)
+  // Clean spreadsheet cells: TextField or Dropdown Selector directly in the box
   // =========================================================================
-  Widget _buildExcelTableView() {
-    final rows = _filteredRows;
-    final cols = _sheet!.columns;
 
-    return Scrollbar(
-      controller: _verticalController,
-      thumbVisibility: true,
-      child: Scrollbar(
-        controller: _horizontalController,
-        thumbVisibility: true,
-        notificationPredicate: (notif) => notif.depth == 1,
-        child: SingleChildScrollView(
-          controller: _verticalController,
-          scrollDirection: Axis.vertical,
-          child: SingleChildScrollView(
-            controller: _horizontalController,
-            scrollDirection: Axis.horizontal,
-            child: DataTable(
-              headingRowColor: WidgetStateProperty.all(const Color(0xFFF1F5F9)),
-              dataRowMinHeight: 46,
-              dataRowMaxHeight: 52,
-              columns: [
-                const DataColumn(
-                  label: Text('#', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+  bool _isDropdownColumn(ApiColumn col) {
+    final colLower = col.columnName.trim().toLowerCase();
+    final keyLower = col.columnKey.trim().toLowerCase();
+    if (colLower == 'status' || keyLower == 'status' || colLower.contains('status') || keyLower.contains('status')) {
+      return true;
+    }
+    return col.columnType.trim().toLowerCase() == 'dropdown' || col.options.isNotEmpty;
+  }
+
+  List<String> _getDropdownOptions(ApiColumn col, [String? currentVal]) {
+    final colLower = col.columnName.trim().toLowerCase();
+    final keyLower = col.columnKey.trim().toLowerCase();
+    final isStatus = colLower == 'status' || keyLower == 'status' || colLower.contains('status') || keyLower.contains('status');
+
+    List<String> result = [];
+    if (isStatus) {
+      result = ['New', 'In Progress', 'Closed', 'Won', 'Lost'];
+      if (col.options.isNotEmpty) {
+        for (final o in col.options) {
+          if (!result.any((r) => r.toLowerCase() == o.toLowerCase())) {
+            result.add(o);
+          }
+        }
+      }
+    } else if (col.options.isNotEmpty) {
+      result = List<String>.from(col.options);
+    } else {
+      result = ['Yes', 'No', 'Pending'];
+    }
+
+    if (currentVal != null && currentVal.trim().isNotEmpty) {
+      final formatted = isStatus ? _formatStatusLabel(currentVal) : currentVal.trim();
+      if (!result.any((r) => r.toLowerCase() == formatted.toLowerCase())) {
+        result.add(formatted);
+      }
+    }
+
+    return result;
+  }
+
+  String _formatStatusLabel(String raw) {
+    final lower = raw.trim().toLowerCase().replaceAll('_', ' ');
+    if (lower == 'new') return 'New';
+    if (lower == 'in progress' || lower == 'progress') return 'In Progress';
+    if (lower == 'closed') return 'Closed';
+    if (lower == 'won') return 'Won';
+    if (lower == 'lost') return 'Lost';
+    if (raw.isEmpty) return 'New';
+    return raw
+        .split(' ')
+        .map((w) => w.isNotEmpty ? '${w[0].toUpperCase()}${w.substring(1)}' : '')
+        .join(' ');
+  }
+
+  Color _getStatusColor(String status) {
+    final lower = status.toLowerCase();
+    if (lower.contains('new')) return const Color(0xFF1D4ED8); // Blue
+    if (lower.contains('progress')) return const Color(0xFFD97706); // Amber
+    if (lower.contains('closed') || lower.contains('won')) return const Color(0xFF16A34A); // Green
+    if (lower.contains('lost') || lower.contains('reject')) return const Color(0xFFDC2626); // Red
+    return const Color(0xFF475569); // Slate
+  }
+
+  Color _getStatusBgColor(String status) {
+    final lower = status.toLowerCase();
+    if (lower.contains('new')) return const Color(0xFFEFF6FF); // Light blue
+    if (lower.contains('progress')) return const Color(0xFFFEF3C7); // Light amber
+    if (lower.contains('closed') || lower.contains('won')) return const Color(0xFFDCFCE7); // Light green
+    if (lower.contains('lost') || lower.contains('reject')) return const Color(0xFFFEE2E2); // Light red
+    return const Color(0xFFF1F5F9); // Light slate
+  }
+
+  Future<void> _quickUpdateRowDropdown(ApiRow row, ApiColumn col, String newValue) async {
+    final colLower = col.columnName.trim().toLowerCase();
+    final keyLower = col.columnKey.trim().toLowerCase();
+    final isStatus = colLower == 'status' || keyLower == 'status' || colLower.contains('status') || keyLower.contains('status');
+
+    final Map<String, dynamic> updatedData = Map.from(row.data);
+    updatedData[col.columnName] = newValue;
+    updatedData[col.columnKey] = newValue;
+
+    String newStatus = row.status;
+    if (isStatus) {
+      newStatus = newValue.toLowerCase().replaceAll(' ', '_');
+      updatedData['Status'] = _formatStatusLabel(newValue);
+      updatedData['status'] = newStatus;
+    }
+
+    setState(() {
+      row.data[col.columnName] = newValue;
+      row.data[col.columnKey] = newValue;
+      if (isStatus) {
+        row.data['Status'] = _formatStatusLabel(newValue);
+        row.data['status'] = newStatus;
+        row.status = newStatus;
+      }
+    });
+
+    try {
+      final response = await ApiService.updateRow(
+        rowId: row.id,
+        data: updatedData,
+        status: newStatus,
+        role: _getUserRoleString(),
+      );
+
+      if (!mounted) return;
+
+      if (response['status'] == true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('${col.columnName} updated to "$newValue"'),
+            backgroundColor: AppColors.success,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+        _fetchSheetData();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(response['message'] ?? 'Failed to update ${col.columnName}.'),
+            backgroundColor: AppColors.error,
+          ),
+        );
+        _fetchSheetData();
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error updating: $e'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+      _fetchSheetData();
+    }
+  }
+
+  Widget _buildDropdownCell({
+    required double width,
+    required ApiColumn col,
+    required String currentValue,
+    required ValueChanged<String> onSelected,
+    bool isStatus = false,
+    bool isEditingRow = false,
+  }) {
+    final options = _getDropdownOptions(col, currentValue);
+    final displayVal = isStatus
+        ? _formatStatusLabel(currentValue.isNotEmpty ? currentValue : 'New')
+        : (currentValue.isNotEmpty ? currentValue : (options.isNotEmpty ? options.first : ''));
+
+    final isSelected = (String opt) {
+      if (isStatus) {
+        return opt.toLowerCase() == displayVal.toLowerCase() ||
+               opt.toLowerCase().replaceAll(' ', '_') == currentValue.toLowerCase();
+      }
+      return opt.toLowerCase() == currentValue.toLowerCase();
+    };
+
+    return Container(
+      width: width,
+      height: 36,
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(
+          right: BorderSide(color: Color(0xFFCBD5E1), width: 1),
+          bottom: BorderSide(color: Color(0xFFCBD5E1), width: 1),
+        ),
+      ),
+      child: PopupMenuButton<String>(
+        tooltip: 'Select ${col.columnName}',
+        offset: const Offset(0, 36),
+        padding: EdgeInsets.zero,
+        elevation: 6,
+        color: Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+          side: const BorderSide(color: Color(0xFFE2E8F0)),
+        ),
+        onSelected: onSelected,
+        itemBuilder: (ctx) => options.map((opt) {
+          final active = isSelected(opt);
+          return PopupMenuItem<String>(
+            value: opt,
+            height: 38,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Row(
+              children: [
+                if (isStatus) ...[
+                  Container(
+                    width: 9,
+                    height: 9,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _getStatusColor(opt),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                ],
+                Expanded(
+                  child: Text(
+                    opt,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: active ? FontWeight.bold : FontWeight.w500,
+                      color: active ? (isStatus ? _getStatusColor(opt) : AppColors.primary) : const Color(0xFF1E293B),
+                    ),
+                  ),
                 ),
-                ...cols.map((col) {
-                  Color tagColor;
-                  if (col.isAccounts) {
-                    tagColor = const Color(0xFF10B981);
-                  } else if (col.isExecutive) {
-                    tagColor = const Color(0xFFF59E0B);
-                  } else {
-                    tagColor = const Color(0xFF3B82F6);
-                  }
-
-                  return DataColumn(
-                    label: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          col.columnName,
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                        ),
-                        const SizedBox(width: 6),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                if (active) ...[
+                  Icon(
+                    Icons.check_rounded,
+                    size: 15,
+                    color: isStatus ? _getStatusColor(opt) : AppColors.primary,
+                  ),
+                ],
+              ],
+            ),
+          );
+        }).toList(),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          alignment: Alignment.centerLeft,
+          child: Row(
+            children: [
+              Expanded(
+                child: isStatus
+                    ? Align(
+                        alignment: Alignment.centerLeft,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
                           decoration: BoxDecoration(
-                            color: tagColor.withValues(alpha: 0.1),
+                            color: _getStatusBgColor(displayVal),
                             borderRadius: BorderRadius.circular(4),
                           ),
                           child: Text(
-                            col.userType.toUpperCase(),
-                            style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: tagColor),
+                            displayVal,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: _getStatusColor(displayVal),
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
+                        ),
+                      )
+                    : Text(
+                        displayVal.isNotEmpty ? displayVal : 'Select...',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: displayVal.isNotEmpty ? const Color(0xFF0F172A) : const Color(0xFF94A3B8),
+                          fontWeight: FontWeight.w500,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+              ),
+              const SizedBox(width: 4),
+              const Icon(
+                Icons.arrow_drop_down_rounded,
+                size: 18,
+                color: Color(0xFF64748B),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  double _getColumnWidth(ApiColumn col) {
+    final nameLower = col.columnName.toLowerCase();
+    if (nameLower.contains('number') && !nameLower.contains('account')) return 145.0;
+    if (nameLower == 'name' || nameLower == 'candidate name') return 180.0;
+    if (nameLower.contains('country')) return 130.0;
+    if (nameLower.contains('agency') || nameLower.contains('company')) return 175.0;
+    if (nameLower.contains('amount') || nameLower.contains('charge') || nameLower.contains('credit') || nameLower.contains('payment')) return 165.0;
+    if (nameLower.contains('profit') || nameLower.contains('cash')) return 145.0;
+    if (nameLower.contains('bank')) return 165.0;
+    if (nameLower.contains('advance')) return 165.0;
+    if (nameLower.contains('status')) return 145.0;
+    if (_isDropdownColumn(col)) return 155.0;
+    return (col.columnName.length * 9.5 + 70.0).clamp(140.0, 250.0);
+  }
+
+  Widget _buildExcelTableView() {
+    if (_sheet == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    final rows = _filteredRows;
+    final cols = _sheet!.columns;
+
+    // Google Sheets style: Displays data rows PLUS empty rows filling the full page (at least 35 rows)
+    final totalRowCount = math.max(rows.length + (_isAddingInlineRow ? 22 : 20), 35);
+
+    return Column(
+      children: [
+        // Google Sheets Clean Top Toolbar
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          decoration: const BoxDecoration(
+            color: Color(0xFFF8FAFC),
+            border: Border(bottom: BorderSide(color: Color(0xFFE2E8F0))),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      if (_isAddingInlineRow) ...[
+                        ElevatedButton.icon(
+                          onPressed: _isSavingInline ? null : _saveInlineAddLead,
+                          icon: _isSavingInline
+                              ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                              : const Icon(Icons.check_rounded, size: 16),
+                          label: Text(_isSavingInline ? 'Saving...' : 'Save Lead', style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold)),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF16A34A),
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(5)),
+                            elevation: 1,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        OutlinedButton.icon(
+                          onPressed: _isSavingInline ? null : _cancelInlineAddLead,
+                          icon: const Icon(Icons.close_rounded, size: 16),
+                          label: const Text('Cancel', style: TextStyle(fontSize: 12)),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: const Color(0xFF64748B),
+                            side: const BorderSide(color: Color(0xFFCBD5E1)),
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(5)),
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        const Text(
+                          'Adding new lead — Type into the row boxes below and click Save Lead',
+                          style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Color(0xFF16A34A)),
+                        ),
+                      ] else if (_editingRowId != null) ...[
+                        Builder(builder: (ctx) {
+                          final editingRow = rows.firstWhere(
+                            (r) => r.id == _editingRowId,
+                            orElse: () => _sheet!.rows.firstWhere((r) => r.id == _editingRowId, orElse: () => rows.first),
+                          );
+                          return Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              ElevatedButton.icon(
+                                onPressed: _isSavingInline ? null : () => _saveInlineRowEdit(editingRow),
+                                icon: _isSavingInline
+                                    ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                                    : const Icon(Icons.check_rounded, size: 16),
+                                label: Text(_isSavingInline ? 'Saving...' : 'Save Row #$_editingRowId', style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold)),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: const Color(0xFF16A34A),
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(5)),
+                                  elevation: 1,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              OutlinedButton.icon(
+                                onPressed: _isSavingInline ? null : _cancelInlineRowEdit,
+                                icon: const Icon(Icons.close_rounded, size: 16),
+                                label: const Text('Cancel', style: TextStyle(fontSize: 12)),
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: const Color(0xFF64748B),
+                                  side: const BorderSide(color: Color(0xFFCBD5E1)),
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(5)),
+                                ),
+                              ),
+                              const SizedBox(width: 14),
+                              Text(
+                                'Editing row #$_editingRowId — Type into the boxes below and click Save',
+                                style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Color(0xFF1D4ED8)),
+                              ),
+                            ],
+                          );
+                        }),
+                      ] else ...[
+                        if (_isManager) ...[
+                          ElevatedButton.icon(
+                            onPressed: _startInlineAddLead,
+                            icon: const Icon(Icons.add_rounded, size: 16),
+                            label: const Text('Add Row', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold)),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF16A34A),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                              elevation: 0,
+                            ),
+                          ),
+                          const SizedBox(width: 14),
+                        ],
+                        const Text(
+                          'Google Sheets Grid — Click any cell box to edit or click Add Row to insert a new lead',
+                          style: TextStyle(fontSize: 12, color: Color(0xFF64748B), fontWeight: FontWeight.w500),
                         ),
                       ],
-                    ),
-                  );
-                }),
-                const DataColumn(
-                  label: Text('Action', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                    ],
+                  ),
                 ),
-              ],
-              rows: rows.asMap().entries.map((entry) {
-                final idx = entry.key;
-                final row = entry.value;
+              ),
+              const SizedBox(width: 10),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: const Color(0xFFCBD5E1)),
+                ),
+                child: Text(
+                  '${rows.length} leads • ${cols.length} columns',
+                  style: const TextStyle(fontSize: 11.5, color: Color(0xFF475569), fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ),
+        ),
 
-                return DataRow(
-                  cells: [
-                    DataCell(Text('${idx + 1}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
-                    ...cols.map((col) {
-                      final val = row.getValue(col);
-                      return DataCell(
-                        Text(
-                          val.isNotEmpty ? val : '—',
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: val.isNotEmpty ? AppColors.textPrimary : const Color(0xFF94A3B8),
-                          ),
-                        ),
-                        onTap: () => _openLeadDetailsPage(row),
-                      );
-                    }),
-                    DataCell(
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            icon: const Icon(Icons.open_in_new_rounded, size: 18, color: AppColors.primary),
-                            onPressed: () => _openLeadDetailsPage(row, editMode: false),
-                            tooltip: 'View Full Lead Details',
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.edit_outlined, size: 17, color: AppColors.primary),
-                            onPressed: () => _openLeadDetailsPage(row, editMode: true),
-                            tooltip: 'Edit Lead (Full Page)',
-                          ),
-                        ],
-                      ),
+        // Full Page Google Sheets Grid (Vertical & Horizontal Scrollbars)
+        Expanded(
+          child: Scrollbar(
+            controller: _verticalController,
+            thumbVisibility: true,
+            child: Scrollbar(
+              controller: _horizontalController,
+              thumbVisibility: true,
+              notificationPredicate: (notif) => notif.depth == 1,
+              child: SingleChildScrollView(
+                controller: _verticalController,
+                scrollDirection: Axis.vertical,
+                child: SingleChildScrollView(
+                  controller: _horizontalController,
+                  scrollDirection: Axis.horizontal,
+                  child: Container(
+                    margin: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: const Color(0xFFCBD5E1), width: 1),
+                      color: Colors.white,
                     ),
-                  ],
-                );
-              }).toList(),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Column Headers Row (Row 0)
+                        _buildGridHeaderRow(cols),
+
+                        // All Rows: Data rows + Active Add row + Empty Google Sheets rows filling the page
+                        for (int i = 0; i < totalRowCount; i++)
+                          _buildGridRow(
+                            displayIndex: i,
+                            rows: rows,
+                            cols: cols,
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
         ),
+      ],
+    );
+  }
+
+  // Column Headers Row (A, B, C... / Column Names)
+  Widget _buildGridHeaderRow(List<ApiColumn> cols) {
+    return Container(
+      color: const Color(0xFFF1F5F9),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Row Index Header Box (#)
+          Container(
+            width: 50,
+            height: 38,
+            alignment: Alignment.center,
+            decoration: const BoxDecoration(
+              border: Border(
+                right: BorderSide(color: Color(0xFFCBD5E1), width: 1),
+                bottom: BorderSide(color: Color(0xFF94A3B8), width: 1.5),
+              ),
+            ),
+            child: const Text('#', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12, color: Color(0xFF475569))),
+          ),
+
+          // Each Column Header Box
+          ...cols.map((col) {
+            final width = _getColumnWidth(col);
+            Color tagColor;
+            if (col.isAccounts) {
+              tagColor = const Color(0xFF10B981);
+            } else if (col.isExecutive) {
+              tagColor = const Color(0xFFF59E0B);
+            } else {
+              tagColor = const Color(0xFF3B82F6);
+            }
+
+            return Container(
+              width: width,
+              height: 38,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: const BoxDecoration(
+                border: Border(
+                  right: BorderSide(color: Color(0xFFCBD5E1), width: 1),
+                  bottom: BorderSide(color: Color(0xFF94A3B8), width: 1.5),
+                ),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      col.columnName,
+                      style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12, color: Color(0xFF1E293B)),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
+                    decoration: BoxDecoration(
+                      color: tagColor.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                    child: Text(
+                      col.userType.toUpperCase(),
+                      style: TextStyle(fontSize: 8, fontWeight: FontWeight.w800, color: tagColor),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }),
+
+          // Actions Column Header Box
+          Container(
+            width: 100,
+            height: 38,
+            alignment: Alignment.center,
+            decoration: const BoxDecoration(
+              border: Border(
+                bottom: BorderSide(color: Color(0xFF94A3B8), width: 1.5),
+              ),
+            ),
+            child: const Text('Actions', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12, color: Color(0xFF475569))),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Unified Google Sheets Row Builder: Data Rows, Active Add Row, & Empty Rows
+  Widget _buildGridRow({
+    required int displayIndex,
+    required List<ApiRow> rows,
+    required List<ApiColumn> cols,
+  }) {
+    final bool hasData = displayIndex < rows.length;
+    final ApiRow? rowData = hasData ? rows[displayIndex] : null;
+
+    // Check if this row is the active inline add row (placed immediately after the existing data rows)
+    final bool isInlineAddRow = _isAddingInlineRow && (displayIndex == rows.length);
+    final bool isEditing = hasData && (_editingRowId == rowData!.id);
+
+    final rowNumber = displayIndex + 1;
+
+    return Container(
+      color: Colors.white,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Row Index Box (#1, #2, #3... all the way down)
+          Container(
+            width: 50,
+            height: 36,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: isInlineAddRow ? const Color(0xFFF0FDF4) : const Color(0xFFF8FAFC),
+              border: const Border(
+                right: BorderSide(color: Color(0xFFCBD5E1), width: 1),
+                bottom: BorderSide(color: Color(0xFFCBD5E1), width: 1),
+              ),
+            ),
+            child: isInlineAddRow
+                ? Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF16A34A),
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                    child: const Text('NEW', style: TextStyle(color: Colors.white, fontSize: 8.5, fontWeight: FontWeight.w800)),
+                  )
+                : Text(
+                    '$rowNumber',
+                    style: TextStyle(
+                      fontWeight: isEditing ? FontWeight.w800 : FontWeight.w600,
+                      fontSize: 11.5,
+                      color: isEditing ? AppColors.primary : const Color(0xFF64748B),
+                    ),
+                  ),
+          ),
+
+          // Every Column Box: Direct Text Field or Dropdown Selector
+          ...cols.map((col) {
+            final width = _getColumnWidth(col);
+            final colLower = col.columnName.trim().toLowerCase();
+            final keyLower = col.columnKey.trim().toLowerCase();
+            final isStatusCol = colLower == 'status' || colLower.contains('status') || keyLower.contains('status');
+            final isDropdown = _isDropdownColumn(col);
+            final isNumber = col.columnType == 'number' ||
+                colLower.contains('amount') ||
+                colLower.contains('charge') ||
+                colLower.contains('profit') ||
+                colLower.contains('credit') ||
+                colLower.contains('cash') ||
+                colLower == 'number';
+
+            // Case A: Row is being edited
+            if (isEditing) {
+              final ctrl = _editRowControllers[col.columnKey] ?? _editRowControllers[col.columnName];
+              if (isDropdown) {
+                final currentVal = (ctrl?.text.isNotEmpty == true)
+                    ? ctrl!.text
+                    : (isStatusCol ? (rowData?.status ?? 'New') : (rowData?.getValue(col) ?? ''));
+                return _buildDropdownCell(
+                  width: width,
+                  col: col,
+                  currentValue: currentVal,
+                  isStatus: isStatusCol,
+                  isEditingRow: true,
+                  onSelected: (selectedVal) {
+                    setState(() {
+                      if (ctrl != null) ctrl.text = selectedVal;
+                      if (_editRowControllers.containsKey(col.columnKey)) _editRowControllers[col.columnKey]!.text = selectedVal;
+                      if (_editRowControllers.containsKey(col.columnName)) _editRowControllers[col.columnName]!.text = selectedVal;
+                      if (isStatusCol) _editRowStatus = selectedVal.toLowerCase().replaceAll(' ', '_');
+                    });
+                  },
+                );
+              }
+
+              return Container(
+                width: width,
+                height: 36,
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  border: Border(
+                    right: BorderSide(color: Color(0xFFCBD5E1), width: 1),
+                    bottom: BorderSide(color: Color(0xFFCBD5E1), width: 1),
+                  ),
+                ),
+                child: TextField(
+                  controller: ctrl,
+                  keyboardType: isNumber ? TextInputType.number : TextInputType.text,
+                  style: const TextStyle(fontSize: 12, color: Color(0xFF0F172A), fontWeight: FontWeight.w400),
+                  cursorColor: const Color(0xFF1A73E8),
+                  textInputAction: TextInputAction.done,
+                  onSubmitted: (_) {
+                    if (rowData != null) {
+                      _saveInlineRowEdit(rowData);
+                    }
+                  },
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 9),
+                    border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
+                  ),
+                ),
+              );
+            }
+
+            // Case B: Row is the active inline add row
+            if (isInlineAddRow) {
+              final ctrl = _newRowControllers[col.columnKey] ?? _newRowControllers[col.columnName];
+              if (isDropdown) {
+                final currentVal = (ctrl?.text.isNotEmpty == true)
+                    ? ctrl!.text
+                    : (isStatusCol ? 'New' : (_getDropdownOptions(col).isNotEmpty ? _getDropdownOptions(col).first : ''));
+                return _buildDropdownCell(
+                  width: width,
+                  col: col,
+                  currentValue: currentVal,
+                  isStatus: isStatusCol,
+                  isEditingRow: true,
+                  onSelected: (selectedVal) {
+                    setState(() {
+                      if (ctrl != null) ctrl.text = selectedVal;
+                      if (_newRowControllers.containsKey(col.columnKey)) _newRowControllers[col.columnKey]!.text = selectedVal;
+                      if (_newRowControllers.containsKey(col.columnName)) _newRowControllers[col.columnName]!.text = selectedVal;
+                      if (isStatusCol) _newRowStatus = selectedVal.toLowerCase().replaceAll(' ', '_');
+                    });
+                  },
+                );
+              }
+
+              return Container(
+                width: width,
+                height: 36,
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  border: Border(
+                    right: BorderSide(color: Color(0xFFCBD5E1), width: 1),
+                    bottom: BorderSide(color: Color(0xFFCBD5E1), width: 1),
+                  ),
+                ),
+                child: TextField(
+                  controller: ctrl,
+                  keyboardType: isNumber ? TextInputType.number : TextInputType.text,
+                  style: const TextStyle(fontSize: 12, color: Color(0xFF0F172A), fontWeight: FontWeight.w400),
+                  cursorColor: const Color(0xFF1A73E8),
+                  textInputAction: TextInputAction.done,
+                  onSubmitted: (_) {
+                    _saveInlineAddLead();
+                  },
+                  decoration: InputDecoration(
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
+                    border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
+                    hintText: isStatusCol ? 'new' : '',
+                    hintStyle: const TextStyle(fontSize: 11, color: Color(0xFF94A3B8)),
+                  ),
+                ),
+              );
+            }
+
+            // Case C: Data Row not in edit mode
+            if (hasData) {
+              if (isDropdown) {
+                final currentVal = isStatusCol
+                    ? (rowData!.status.isNotEmpty ? rowData.status : rowData.getValue(col))
+                    : rowData!.getValue(col);
+                return _buildDropdownCell(
+                  width: width,
+                  col: col,
+                  currentValue: currentVal,
+                  isStatus: isStatusCol,
+                  isEditingRow: false,
+                  onSelected: (selectedVal) {
+                    _quickUpdateRowDropdown(rowData, col, selectedVal);
+                  },
+                );
+              }
+
+              final val = rowData!.getValue(col);
+              return InkWell(
+                onTap: () {
+                  _startInlineRowEdit(rowData, focusColumn: col.columnKey);
+                },
+                child: Container(
+                  width: width,
+                  height: 36,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  alignment: Alignment.centerLeft,
+                  decoration: const BoxDecoration(
+                    color: Colors.white,
+                    border: Border(
+                      right: BorderSide(color: Color(0xFFCBD5E1), width: 1),
+                      bottom: BorderSide(color: Color(0xFFCBD5E1), width: 1),
+                    ),
+                  ),
+                  child: Text(
+                    val.isNotEmpty ? val : '',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: val.isNotEmpty ? const Color(0xFF0F172A) : const Color(0xFF94A3B8),
+                      fontWeight: (colLower == 'name' || colLower == 'number') ? FontWeight.w600 : FontWeight.w400,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              );
+            }
+
+            // Case D: Empty Google Sheets Row (Clicking any box activates inline adding)
+            return InkWell(
+              onTap: () {
+                _startInlineAddLead();
+              },
+              child: Container(
+                width: width,
+                height: 36,
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  border: Border(
+                    right: BorderSide(color: Color(0xFFCBD5E1), width: 1),
+                    bottom: BorderSide(color: Color(0xFFCBD5E1), width: 1),
+                  ),
+                ),
+              ),
+            );
+          }),
+
+          // Actions Box: Same height & border as cells
+          Container(
+            width: 100,
+            height: 36,
+            alignment: Alignment.center,
+            decoration: const BoxDecoration(
+              border: Border(
+                bottom: BorderSide(color: Color(0xFFCBD5E1), width: 1),
+              ),
+            ),
+            child: (isEditing || isInlineAddRow)
+                ? Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: isInlineAddRow ? const Color(0xFFDCFCE7) : const Color(0xFFDBEAFE),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(
+                      isInlineAddRow ? 'New Lead' : 'Editing',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: isInlineAddRow ? const Color(0xFF15803D) : const Color(0xFF1D4ED8),
+                      ),
+                    ),
+                  )
+                : (hasData
+                    ? Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.edit_outlined, size: 15, color: AppColors.primary),
+                            onPressed: () => _startInlineRowEdit(rowData!),
+                            tooltip: 'Edit in Box',
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                          ),
+                          const SizedBox(width: 3),
+                          IconButton(
+                            icon: const Icon(Icons.open_in_new_rounded, size: 14, color: Color(0xFF64748B)),
+                            onPressed: () => _openLeadDetailsPage(rowData!, editMode: false),
+                            tooltip: 'Details',
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                          ),
+                        ],
+                      )
+                    : const SizedBox()),
+          ),
+        ],
       ),
     );
   }
